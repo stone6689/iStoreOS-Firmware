@@ -12,17 +12,16 @@ echo "[deps] Installing build dependencies..."
 sudo apt-get install -y --no-install-recommends \
   binutils \
   bzip2 \
-  diff \
-  find \
+  diffutils \
+  findutils \
   flex \
   gawk \
   gcc \
-  getopt \
   grep \
   gzip \
   libc-dev \
   libncurses5-dev \
-  libz-dev \
+  zlib1g-dev \
   make \
   patch \
   perl \
@@ -30,9 +29,8 @@ sudo apt-get install -y --no-install-recommends \
   rsync \
   subversion \
   unzip \
-  which \
+  util-linux \
   xz-utils \
-  zlib1g-dev \
   build-essential \
   clang \
   file \
