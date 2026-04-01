@@ -1,0 +1,260 @@
+name: Build iStoreOS Firmware
+
+# Trigger: manual only — avoids unnecessary resource consumption
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Build target: x86_64 / arm64 / all"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - x86_64
+          - arm64
+
+env:
+  # Official iStoreOS repository and active branch
+  ISTOREOS_REPO: https://github.com/istoreos/istoreos.git
+  ISTOREOS_BRANCH: istoreos-24.10
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide which targets to build based on the workflow_dispatch input.
+  # On push / schedule, always build both targets.
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          INPUT="${{ github.event.inputs.target }}"
+          # Default to "all" when not triggered manually
+          TARGET="${INPUT:-all}"
+
+          if [ "$TARGET" = "x86_64" ]; then
+            echo 'matrix={"include":[{"target":"x86_64","config":"configs/x86_64.config","name":"x86_64"}]}' >> "$GITHUB_OUTPUT"
+          elif [ "$TARGET" = "arm64" ]; then
+            echo 'matrix={"include":[{"target":"arm64","config":"configs/arm64.config","name":"arm64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"target":"x86_64","config":"configs/x86_64.config","name":"x86_64"},{"target":"arm64","config":"configs/arm64.config","name":"arm64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build job — runs once per matrix entry (x86_64 and/or arm64)
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build iStoreOS (${{ matrix.name }})
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Check out this repository to get configs and scripts
+      # -----------------------------------------------------------------------
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Free up disk space on the GitHub-hosted runner
+      #    The iStoreOS build requires ~20 GB of free space.
+      # -----------------------------------------------------------------------
+      - name: Free disk space
+        run: |
+          echo "[disk] Available before cleanup:"
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          echo "[disk] Available after cleanup:"
+          df -h
+
+      # -----------------------------------------------------------------------
+      # 3. Install build dependencies
+      # -----------------------------------------------------------------------
+      - name: Install build dependencies
+        run: bash scripts/install-deps.sh
+
+      # -----------------------------------------------------------------------
+      # 4. Clone the official iStoreOS source code (shallow clone for speed)
+      # -----------------------------------------------------------------------
+      - name: Clone iStoreOS source
+        run: |
+          echo "[source] Cloning ${ISTOREOS_REPO} branch ${ISTOREOS_BRANCH}..."
+          git clone \
+            --depth 1 \
+            --branch "${ISTOREOS_BRANCH}" \
+            "${ISTOREOS_REPO}" \
+            openwrt
+          echo "[source] Clone complete."
+
+      # -----------------------------------------------------------------------
+      # 5. Update and install feeds (official build step)
+      # -----------------------------------------------------------------------
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: bash ../scripts/setup-feeds.sh
+
+      # -----------------------------------------------------------------------
+      # 6. Apply the target-specific .config
+      #    Copy the seed config then run make defconfig to expand it fully.
+      # -----------------------------------------------------------------------
+      - name: Apply build configuration
+        working-directory: openwrt
+        run: |
+          echo "[config] Applying ${{ matrix.config }}..."
+          cp "../${{ matrix.config }}" .config
+          make defconfig
+          echo "[config] Final .config target:"
+          grep "^CONFIG_TARGET" .config | head -20
+
+      # -----------------------------------------------------------------------
+      # 7. Download all source packages before compiling
+      #    This separates network errors from build errors.
+      # -----------------------------------------------------------------------
+      - name: Download package sources
+        working-directory: openwrt
+        run: |
+          make download -j$(nproc) V=s 2>&1 | tee /tmp/download.log || true
+          # Verify that no downloads are suspiciously small (broken)
+          find dl -size -1024c -delete || true
+          echo "[download] Done."
+
+      # -----------------------------------------------------------------------
+      # 8. Compile the firmware
+      #    Use all available CPUs; fall back to single-thread on failure for
+      #    a cleaner error log.
+      # -----------------------------------------------------------------------
+      - name: Compile firmware
+        id: compile
+        working-directory: openwrt
+        run: |
+          echo "[build] Starting compilation with $(nproc) threads..."
+          if make -j$(nproc) V=s 2>&1 | tee /tmp/build.log; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "[build] Compilation succeeded."
+          else
+            echo "[build] Multi-thread build failed. Retrying single-threaded for error details..."
+            make -j1 V=s 2>&1 | tee /tmp/build-retry.log
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # -----------------------------------------------------------------------
+      # 9. Collect firmware artifacts
+      # -----------------------------------------------------------------------
+      - name: Collect firmware files
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          mkdir -p firmware/${{ matrix.name }}
+          # iStoreOS outputs images under bin/targets/<target>/<subtarget>/
+          find openwrt/bin/targets -type f \( \
+            -name "*.img.gz" -o \
+            -name "*.img"    -o \
+            -name "*.bin"    -o \
+            -name "*.tar.gz" \
+          \) -exec cp {} firmware/${{ matrix.name }}/ \;
+          echo "[artifact] Files collected:"
+          ls -lh firmware/${{ matrix.name }}/
+
+      # -----------------------------------------------------------------------
+      # 10. Upload firmware as a GitHub Actions artifact (30-day retention)
+      # -----------------------------------------------------------------------
+      - name: Upload firmware artifact
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-${{ matrix.name }}-${{ github.run_number }}
+          path: firmware/${{ matrix.name }}/
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # 11. Upload build log on failure for debugging
+      # -----------------------------------------------------------------------
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.name }}-${{ github.run_number }}
+          path: |
+            /tmp/build.log
+            /tmp/build-retry.log
+            /tmp/download.log
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Release job — runs only when both build jobs succeed on main branch
+  # Creates a GitHub Release and uploads firmware files to it.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    # Only publish releases from the main branch
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      # Download all artifacts produced by the build job
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files/
+          pattern: "istoreos-*-${{ github.run_number }}"
+          merge-multiple: false
+
+      - name: List release files
+        run: find release-files/ -type f | sort
+
+      # Generate a timestamp-based tag (matches iStoreOS official naming style)
+      - name: Generate release tag
+        id: tag
+        run: |
+          TAG="istoreos-24.10-$(date -u +'%Y%m%d%H%M')"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "[release] Tag: ${TAG}"
+
+      # Create the GitHub Release with all collected firmware files
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "iStoreOS 24.10 — ${{ steps.tag.outputs.tag }}"
+          body: |
+            ## iStoreOS Firmware — Automated Build
+
+            This release is compiled automatically from the official
+            [iStoreOS source](https://github.com/istoreos/istoreos) (`istoreos-24.10` branch).
+
+            **No modifications have been made** — the firmware is identical to what the
+            official iStoreOS build system produces.
+
+            ### Included targets
+            | Target | Description |
+            |--------|-------------|
+            | x86_64 | PC / virtual machine (EFI + BIOS) |
+            | arm64  | Generic AArch64 / armvirt 64-bit |
+
+            ### How to flash
+            Please refer to the [official iStoreOS documentation](https://doc.linkease.com/zh/guide/istoreos/).
+          files: release-files/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
