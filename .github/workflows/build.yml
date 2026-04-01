@@ -103,7 +103,25 @@ jobs:
           echo "[source] Clone complete."
 
       # -----------------------------------------------------------------------
-      # 5. Update and install feeds (official build step)
+      # 5. Write official iStoreOS feeds.conf
+      #    iStoreOS uses a custom feeds.conf with extra feeds beyond the default
+      #    OpenWrt ones. Source: https://fw0.koolcenter.com/iStoreOS/x86_64_efi/feeds.conf
+      # -----------------------------------------------------------------------
+      - name: Write official iStoreOS feeds.conf
+        working-directory: openwrt
+        run: |
+          cat > feeds.conf << 'FEEDS'
+          src-include defaults feeds.conf.default
+          src-git third_party https://github.com/linkease/istore-packages.git;main
+          src-git diskman https://github.com/jjm2473/luci-app-diskman.git;dev
+          src-git oaf https://github.com/jjm2473/OpenAppFilter.git;dev7
+          src-git linkease_nas https://github.com/linkease/nas-packages.git;master
+          src-git linkease_nas_luci https://github.com/linkease/nas-packages-luci.git;main
+          src-git jjm2473_apps https://github.com/jjm2473/openwrt-apps.git;main
+          FEEDS
+
+      # -----------------------------------------------------------------------
+      # 6. Update and install feeds (official build step)
       # -----------------------------------------------------------------------
       - name: Update and install feeds
         working-directory: openwrt
@@ -123,7 +141,7 @@ jobs:
           grep "^CONFIG_TARGET" .config | head -20
 
       # -----------------------------------------------------------------------
-      # 7. Download all source packages before compiling
+      # 8. Download all source packages before compiling
       #    This separates network errors from build errors.
       # -----------------------------------------------------------------------
       - name: Download package sources
@@ -135,7 +153,7 @@ jobs:
           echo "[download] Done."
 
       # -----------------------------------------------------------------------
-      # 8. Compile the firmware
+      # 9. Compile the firmware
       #    Use all available CPUs; fall back to single-thread on failure for
       #    a cleaner error log.
       # -----------------------------------------------------------------------
@@ -155,7 +173,7 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # 9. Collect firmware artifacts
+      # 10. Collect firmware artifacts
       # -----------------------------------------------------------------------
       - name: Collect firmware files
         if: steps.compile.outputs.status == 'success'
@@ -172,7 +190,7 @@ jobs:
           ls -lh firmware/${{ matrix.name }}/
 
       # -----------------------------------------------------------------------
-      # 10. Upload firmware as a GitHub Actions artifact (30-day retention)
+      # 11. Upload firmware as a GitHub Actions artifact (30-day retention)
       # -----------------------------------------------------------------------
       - name: Upload firmware artifact
         if: steps.compile.outputs.status == 'success'
@@ -183,7 +201,7 @@ jobs:
           retention-days: 30
 
       # -----------------------------------------------------------------------
-      # 11. Upload build log on failure for debugging
+      # 12. Upload build log on failure for debugging
       # -----------------------------------------------------------------------
       - name: Upload build log on failure
         if: failure()
