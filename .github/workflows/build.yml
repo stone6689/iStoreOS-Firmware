@@ -206,6 +206,8 @@ jobs:
     runs-on: ubuntu-22.04
     # Only publish releases from the main branch
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout this repository
