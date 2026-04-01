@@ -48,11 +48,16 @@ echo "[plugins] luci-app-openclash ready."
 # ---------------------------------------------------------------------------
 echo "[plugins] Configuring PassWall feeds..."
 
-# Insert at top of feeds.conf.default so passwall_packages wins over default feeds
-sed -i '1s/^/src-git passwall_packages https:\/\/github.com\/Openwrt-Passwall\/openwrt-passwall-packages.git;main\n/' feeds.conf.default
-sed -i '2s/^/src-git passwall_luci https:\/\/github.com\/Openwrt-Passwall\/openwrt-passwall.git;main\n/' feeds.conf.default
+# Append PassWall feeds into feeds.conf (the official iStoreOS feeds.conf written
+# by setup-feeds.sh). passwall_packages must come before passwall_luci so that
+# proxy core packages are resolved first and don't conflict with default feed versions.
+cat >> feeds.conf << 'PWFEEDS'
+src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
+PWFEEDS
 
 echo "[plugins] Updating PassWall feeds..."
+# Only update the two newly added PassWall feeds; the rest are handled by setup-feeds.sh
 ./scripts/feeds update passwall_packages passwall_luci
 
 # Remove ALL conflicting packages from default feeds that passwall_packages provides.
