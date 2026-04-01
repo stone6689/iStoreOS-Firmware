@@ -1,86 +1,105 @@
 # iStoreOS Firmware — GitHub Actions Auto-Build
 
-This repository automatically compiles **iStoreOS** firmware for **x86_64** and **arm64**
-using GitHub Actions, then publishes the binaries as GitHub Releases.
+通过 GitHub Actions 自动编译 **iStoreOS** 固件，支持 **x86_64** 和 **arm64** 两个平台，编译完成后自动发布到 GitHub Releases。
 
-> **重要说明 / Important**
-> 本仓库不对官方固件做任何修改，编译结果与官方保持完全一致。
-> No modifications are made to the official iStoreOS source code.
+---
+
+## 固件版本说明
+
+本仓库提供两个版本的固件，对应两个独立的 Actions workflow：
+
+| 版本 | Workflow 名称 | 说明 |
+|------|--------------|------|
+| **官方原版** | `Build iStoreOS Firmware` | 与官方完全一致，不添加任何额外功能 |
+| **插件版** | `Build iStoreOS Firmware (with Plugins)` | 在官方基础上加入 OpenClash + PassWall 及所有依赖 |
 
 ---
 
 ## 固件来源 / Source
 
-| Item | Detail |
-|------|--------|
-| 官方仓库 / Official repo | [istoreos/istoreos](https://github.com/istoreos/istoreos) |
-| 活跃分支 / Active branch | `istoreos-24.10` |
+| 项目 | 仓库地址 | 说明 |
+|------|---------|------|
+| iStoreOS | [istoreos/istoreos](https://github.com/istoreos/istoreos) 分支 `istoreos-24.10` | 官方源码 |
+| OpenClash | [vernesong/OpenClash](https://github.com/vernesong/OpenClash) | OpenClash 插件 |
+| Clash Meta (mihomo) | [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) | OpenClash 内核，自动取最新版 |
+| PassWall | [Openwrt-Passwall/openwrt-passwall](https://github.com/Openwrt-Passwall/openwrt-passwall) | PassWall LuCI 应用 |
+| PassWall 依赖包 | [Openwrt-Passwall/openwrt-passwall-packages](https://github.com/Openwrt-Passwall/openwrt-passwall-packages) | xray-core、sing-box 等代理核心 |
 
 ---
 
-## 支持的目标平台 / Supported Targets
+## 支持的目标平台
 
 | Target | 说明 |
 |--------|------|
-| `x86_64` | PC 及虚拟机（BIOS / EFI） |
+| `x86_64` | PC / 虚拟机（BIOS + EFI） |
 | `arm64`  | 通用 AArch64 / armvirt 64-bit |
 
 ---
 
-## 如何触发编译 / How to Trigger a Build
+## 如何触发编译
 
-### 手动触发 / Manual trigger
-1. 进入仓库 → **Actions** → **Build iStoreOS Firmware**
-2. 点击 **Run workflow**
-3. 选择目标平台：`all`（默认）、`x86_64` 或 `arm64`
-4. 点击 **Run workflow** 按钮
+> 编译仅支持手动触发，避免不必要的资源消耗。
 
-> 编译仅通过手动触发，避免不必要的资源消耗。
+1. 进入仓库 → **Actions**
+2. 左侧选择需要的 workflow：
+   - **Build iStoreOS Firmware** — 官方原版
+   - **Build iStoreOS Firmware (with Plugins)** — 含 OpenClash + PassWall
+3. 点击 **Run workflow**
+4. 选择目标平台：`all`（默认）、`x86_64` 或 `arm64`
+5. 点击 **Run workflow** 按钮
+
+编译完成后固件会自动发布到 **[Releases](../../releases)** 页面。
 
 ---
 
-## 仓库结构 / Repository Structure
+## 仓库结构
 
 ```
 .
 ├── .github/
 │   └── workflows/
-│       └── build.yml          # 主 Actions workflow
+│       ├── build.yml              # 官方原版 workflow
+│       └── build-plugins.yml      # 插件版 workflow
 ├── configs/
-│   ├── x86_64.config          # x86_64 目标配置（seed config）
-│   └── arm64.config           # arm64 目标配置（seed config）
+│   ├── x86_64.config              # 官方原版 x86_64 配置
+│   ├── arm64.config               # 官方原版 arm64 配置
+│   ├── x86_64-plugins.config      # 插件版 x86_64 配置
+│   └── arm64-plugins.config       # 插件版 arm64 配置
 ├── scripts/
-│   ├── install-deps.sh        # 安装编译依赖
-│   └── setup-feeds.sh         # 更新并安装 feeds
+│   ├── install-deps.sh            # 安装编译依赖
+│   ├── setup-feeds.sh             # 更新并安装 feeds
+│   └── inject-plugins.sh          # 注入 OpenClash / PassWall / mihomo 内核
 └── README.md
 ```
 
 ---
 
-## 编译步骤说明 / Build Steps
+## 插件版包含的组件
 
-以下步骤严格按照 [iStoreOS 官方编译文档](https://github.com/istoreos/istoreos/blob/istoreos-24.10/README.md) 执行：
-
-1. 安装编译依赖（`binutils`, `gcc`, `make`, `python3`, `rsync` 等）
-2. 克隆官方源码仓库（`istoreos-24.10` 分支，shallow clone）
-3. `./scripts/feeds update -a`
-4. `./scripts/feeds install -a`
-5. 复制 seed config → `make defconfig` 展开完整配置
-6. `make download` 预下载所有源码包
-7. `make -j$(nproc) V=s` 编译固件
-8. 收集 `bin/targets/` 下的 `.img.gz` / `.img` / `.bin` 文件
-9. 上传至 GitHub Release
+| 组件 | 来源 | 说明 |
+|------|------|------|
+| luci-app-openclash | vernesong/OpenClash | OpenClash 界面 |
+| clash_meta (mihomo) | MetaCubeX/mihomo | 预置于 `/etc/openclash/core/clash_meta` |
+| luci-app-passwall | Openwrt-Passwall/openwrt-passwall | PassWall 界面 |
+| xray-core | Openwrt-Passwall/openwrt-passwall-packages | VMess / VLESS / Trojan 等协议核心 |
+| sing-box | 同上 | 现代多协议代理核心 |
+| hysteria | 同上 | QUIC 高性能代理 |
+| naiveproxy | 同上 | 基于 Chrome 网络栈的抗检测代理 |
+| shadowsocks-rust | 同上 | Shadowsocks Rust 实现 |
+| shadowsocks-libev | 同上 | Shadowsocks C 实现 |
+| shadowsocksr-libev | 同上 | ShadowsocksR 客户端 |
+| tuic-client | 同上 | QUIC 协议代理 |
+| trojan-plus | 同上 | Trojan 增强版 |
+| chinadns-ng | 同上 | 国内/海外分流 DNS |
+| geoview | 同上 | Sing-box 路由分流必需（1.12+ 版本要求） |
+| v2ray-geoip / v2ray-geosite | 同上 | Xray/PassWall 路由规则数据库 |
+| v2ray-plugin / xray-plugin / shadow-tls / simple-obfs | 同上 | 混淆传输插件 |
+| dnsmasq-full | OpenWrt 官方 | PassWall DNS 过滤必需 |
 
 ---
 
-## 获取固件 / Download Firmware
+## 许可证
 
-前往 **[Releases](../../releases)** 页面下载最新编译好的固件。
+本仓库构建脚本及 workflow 以 [MIT License](LICENSE) 发布。
 
----
-
-## 许可证 / License
-
-本仓库的构建脚本及 workflow 文件以 [MIT License](LICENSE) 发布。
-
-iStoreOS 本身遵循其官方开源协议，详见 [iStoreOS 仓库](https://github.com/istoreos/istoreos)。
+各第三方组件遵循其各自的开源协议。
