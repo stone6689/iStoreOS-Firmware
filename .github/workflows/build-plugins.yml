@@ -1,0 +1,226 @@
+name: Build iStoreOS Firmware (with Plugins)
+
+# Trigger: manual only
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Build target: x86_64 / arm64 / all"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - x86_64
+          - arm64
+
+env:
+  ISTOREOS_REPO: https://github.com/istoreos/istoreos.git
+  ISTOREOS_BRANCH: istoreos-24.10
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide which targets to build
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare build matrix
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          if [ "$TARGET" = "x86_64" ]; then
+            echo 'matrix={"include":[{"target":"x86_64","config":"configs/x86_64-plugins.config","name":"x86_64"}]}' >> "$GITHUB_OUTPUT"
+          elif [ "$TARGET" = "arm64" ]; then
+            echo 'matrix={"include":[{"target":"arm64","config":"configs/arm64-plugins.config","name":"arm64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"target":"x86_64","config":"configs/x86_64-plugins.config","name":"x86_64"},{"target":"arm64","config":"configs/arm64-plugins.config","name":"arm64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build job
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build iStoreOS+Plugins (${{ matrix.name }})
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "[disk] Available before cleanup:"
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          echo "[disk] Available after cleanup:"
+          df -h
+
+      - name: Install build dependencies
+        run: bash scripts/install-deps.sh
+
+      - name: Clone iStoreOS source
+        run: |
+          echo "[source] Cloning ${ISTOREOS_REPO} branch ${ISTOREOS_BRANCH}..."
+          git clone \
+            --depth 1 \
+            --branch "${ISTOREOS_BRANCH}" \
+            "${ISTOREOS_REPO}" \
+            openwrt
+          echo "[source] Clone complete."
+
+      # -----------------------------------------------------------------------
+      # Inject all plugins before feeds update:
+      #   - OpenClash  : sparse-checkout into package/
+      #   - PassWall   : appended to feeds.conf.default
+      #   - mihomo     : pre-downloaded into files/etc/openclash/core/
+      # -----------------------------------------------------------------------
+      - name: Inject plugins (OpenClash + PassWall + mihomo kernel)
+        working-directory: openwrt
+        run: bash ../scripts/inject-plugins.sh ${{ matrix.target }}
+
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: bash ../scripts/setup-feeds.sh
+
+      - name: Apply build configuration
+        working-directory: openwrt
+        run: |
+          echo "[config] Applying ${{ matrix.config }}..."
+          cp "../${{ matrix.config }}" .config
+          make defconfig
+          echo "[config] Final .config packages:"
+          grep "^CONFIG_PACKAGE_luci-app-openclash\|^CONFIG_PACKAGE_luci-app-passwall\|^CONFIG_TARGET" .config
+
+      - name: Download package sources
+        working-directory: openwrt
+        run: |
+          make download -j$(nproc) V=s 2>&1 | tee /tmp/download.log || true
+          find dl -size -1024c -delete || true
+          echo "[download] Done."
+
+      - name: Compile firmware
+        id: compile
+        working-directory: openwrt
+        run: |
+          echo "[build] Starting compilation with $(nproc) threads..."
+          if make -j$(nproc) V=s 2>&1 | tee /tmp/build.log; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "[build] Compilation succeeded."
+          else
+            echo "[build] Multi-thread build failed. Retrying single-threaded for error details..."
+            make -j1 V=s 2>&1 | tee /tmp/build-retry.log
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Collect firmware files
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          mkdir -p firmware/${{ matrix.name }}
+          find openwrt/bin/targets -type f \( \
+            -name "*.img.gz" -o \
+            -name "*.img"    -o \
+            -name "*.bin"    -o \
+            -name "*.tar.gz" \
+          \) -exec cp {} firmware/${{ matrix.name }}/ \;
+          echo "[artifact] Files collected:"
+          ls -lh firmware/${{ matrix.name }}/
+
+      - name: Upload firmware artifact
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: istoreos-plugins-${{ matrix.name }}-${{ github.run_number }}
+          path: firmware/${{ matrix.name }}/
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-plugins-${{ matrix.name }}-${{ github.run_number }}
+          path: |
+            /tmp/build.log
+            /tmp/build-retry.log
+            /tmp/download.log
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Release job
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files/
+          pattern: "istoreos-plugins-*-${{ github.run_number }}"
+          merge-multiple: false
+
+      - name: List release files
+        run: find release-files/ -type f | sort
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          TAG="istoreos-24.10-plugins-$(date -u +'%Y%m%d%H%M')"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "[release] Tag: ${TAG}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "iStoreOS 24.10 + OpenClash + PassWall — ${{ steps.tag.outputs.tag }}"
+          body: |
+            ## iStoreOS Firmware + Plugins — Automated Build
+
+            Compiled from the official [iStoreOS source](https://github.com/istoreos/istoreos)
+            (`istoreos-24.10` branch) with the following additions:
+
+            | 组件 | 来源 |
+            |------|------|
+            | [luci-app-openclash](https://github.com/vernesong/OpenClash) | OpenClash 插件 |
+            | [Clash Meta (mihomo)](https://github.com/MetaCubeX/mihomo) | 已预置于 `/etc/openclash/core/clash_meta` |
+            | [luci-app-passwall](https://github.com/xiaorouji/openwrt-passwall) | PassWall 插件 |
+            | [passwall-packages](https://github.com/xiaorouji/openwrt-passwall-packages) | PassWall 依赖（xray、sing-box 等） |
+
+            ### 包含平台
+            | Target | 说明 |
+            |--------|------|
+            | x86_64 | PC / 虚拟机（EFI + BIOS） |
+            | arm64  | 通用 AArch64 / armvirt 64-bit |
+
+            ### 官方原版固件
+            不含任何插件的纯官方版本请使用 **Build iStoreOS Firmware** workflow 编译。
+          files: release-files/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
