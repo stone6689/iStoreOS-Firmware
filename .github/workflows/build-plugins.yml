@@ -1,14 +1,14 @@
 name: Build iStoreOS Firmware (with Plugins)
 
 # Trigger: manual only
-于:
+on:
   workflow_dispatch:
     inputs:
       target:
         description: "Build target: x86_64 / arm64 / all"
         required: true
-        默认: "all"
-        输入: choice
+        default: "all"
+        type: choice
         options:
           - all
           - x86_64
@@ -145,18 +145,32 @@ jobs:
             exit 1
           fi
 
+      - name: List all build output files
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          echo "[diag] Full listing of openwrt/bin/targets:"
+          find openwrt/bin/targets -type f | sort
+          echo "[diag] Done."
+
       - name: Collect firmware files
         if: steps.compile.outputs.status == 'success'
         run: |
           mkdir -p firmware/${{ matrix.name }}
-          find openwrt/bin/targets -type f \( \
+          find openwrt/bin/targets -maxdepth 3 -type f \( \
             -name "*.img.gz" -o \
             -name "*.img"    -o \
             -name "*.bin"    -o \
-            -name "*.tar.gz" \
-          \) -exec cp {} firmware/${{ matrix.name }}/ \;
+            -name "*.tar.gz" -o \
+            -name "*.json"   \
+          \) ! -path "*/packages/*" \
+            -exec cp {} firmware/${{ matrix.name }}/ \;
           echo "[artifact] Files collected:"
           ls -lh firmware/${{ matrix.name }}/
+          COUNT=$(ls firmware/${{ matrix.name }}/ | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "##[error] No firmware images found under openwrt/bin/targets!"
+            exit 1
+          fi
 
       - name: Upload firmware artifact
         if: steps.compile.outputs.status == 'success'
@@ -235,7 +249,7 @@ jobs:
 
             ### 官方原版固件
             不含任何插件的纯官方版本请使用 **Build iStoreOS Firmware** workflow 编译。
-          文件: release-files/**/*
+          files: release-files/**/*
           draft: false
           prerelease: false
         env:
