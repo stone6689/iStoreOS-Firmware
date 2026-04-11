@@ -177,23 +177,58 @@ jobs:
       # -----------------------------------------------------------------------
       # 10. Collect firmware artifacts
       # -----------------------------------------------------------------------
+      - name: List build output files (debug)
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          echo "[debug] Checking build output structure..."
+          find openwrt/bin -type f 2>/dev/null | head -30 || echo "No files found"
+          echo "[debug] Done."
+
       - name: Collect firmware files
         if: steps.compile.outputs.status == 'success'
         run: |
+          echo "[collect] Starting firmware collection..."
           mkdir -p firmware/${{ matrix.name }}
-          # iStoreOS outputs images under bin/targets/<target>/<subtarget>/
-          find openwrt/bin/targets -type f \( \
-            -name "*.img.gz" -o \
-            -name "*.img"    -o \
-            -name "*.bin"    -o \
-            -name "*.tar.gz" \
-          \) -exec cp {} firmware/${{ matrix.name }}/ \;
-          echo "[artifact] Files collected:"
-          ls -lh firmware/${{ matrix.name }}/
-
-      # -----------------------------------------------------------------------
-      # 11. Upload firmware as a GitHub Actions artifact (30-day retention)
-      # -----------------------------------------------------------------------
+          
+          # 查找固件文件
+          echo "[collect] Searching for firmware files..."
+          
+          # 方法1：标准查找
+          if find openwrt/bin/targets -type f \( -name "*.img.gz" -o -name "*.img" -o -name "*.bin" -o -name "*.tar.gz" \) ! -path "*/packages/*" -exec cp {} firmware/${{ matrix.name }}/ \; 2>/dev/null; then
+            echo "[collect] Found files with standard pattern"
+          else
+            echo "[collect] Standard pattern failed, trying broader search..."
+            
+            # 方法2：查找任何可能的目标文件
+            TARGET_PATHS=$(find openwrt/bin -type f 2>/dev/null | grep -v "/packages/" | grep -E "\.(img|gz|bin|tar)$" || true)
+            if [ -n "$TARGET_PATHS" ]; then
+              echo "[collect] Found files:"
+              echo "$TARGET_PATHS"
+              echo "$TARGET_PATHS" | xargs -I {} cp {} firmware/${{ matrix.name }}/ 2>/dev/null || true
+            else
+              # 方法3：备份所有非包文件
+              echo "[collect] Could not find standard firmware files, copying all non-package files..."
+              find openwrt/bin -type f ! -path "*/packages/*" -exec cp {} firmware/${{ matrix.name }}/ \; 2>/dev/null || true
+            fi
+          fi
+          
+          echo "[collect] Collected files:"
+          ls -lh firmware/${{ matrix.name }}/ 2>/dev/null || echo "No files collected"
+          
+          # 检查是否收集到了文件
+          COUNT=0
+          if [ -d "firmware/${{ matrix.name }}" ]; then
+            COUNT=$(find firmware/${{ matrix.name }} -type f 2>/dev/null | wc -l)
+          fi
+          
+          if [ "$COUNT" -eq 0 ]; then
+            echo "##[error] No firmware images collected!"
+            echo "##[error] Debug information:"
+            find openwrt/bin -type f 2>/dev/null | sort
+            exit 1
+          else
+            echo "[collect] Successfully collected $COUNT firmware file(s)"
+          fi
       - name: Upload firmware artifact
         if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
