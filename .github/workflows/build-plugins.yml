@@ -94,13 +94,14 @@ jobs:
             lzma lzop p7zip-full p7zip \
             upx-ucl uglifyjs \
             libltdl-dev libc6-dev-i386 \
-            libsodium-dev libev-dev libc-ares-dev \
             asciidoc doxygen graphviz \
-            msmtp nano vim
+            msmtp nano vim \
+            diffutils findutils grep gzip perl util-linux
             
           # 安装 Python 2（如果某些包需要）
           if ! dpkg -l | grep -q python2; then
-            sudo -E apt-get -qq install python2 python2-dev
+            echo "[deps] Installing Python 2 for compatibility..."
+            sudo apt-get install -y python2 python2-dev
           fi
           
           # 安装 Rust（如果需要）
@@ -192,71 +193,90 @@ jobs:
             echo "status=failure" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-      - name: List all build output files
-        if: steps.compile.outputs.status == 'success'
-        run: |
-          echo "[diag] Full directory structure:"
-          find openwrt/bin -type f 2>/dev/null | head -50
-          echo "[diag] Targets directory:"
-          ls -la openwrt/bin/targets/ 2>/dev/null || echo "targets directory not found"
-          echo "[diag] Done."
 
-      - name: Collect firmware files
+      - name: Debug build output structure
         if: steps.compile.outputs.status == 'success'
         run: |
-          echo "[collect] Starting firmware collection..."
+          echo "=== BUILD OUTPUT DIAGNOSTICS ==="
+          echo "1. Checking openwrt directory structure..."
+          if [ -d "openwrt" ]; then
+            echo "openwrt directory exists"
+            echo "Top-level contents:"
+            ls -la openwrt/
+            echo ""
+            
+            echo "2. Checking bin directory..."
+            if [ -d "openwrt/bin" ]; then
+              echo "bin directory exists"
+              echo "bin directory contents:"
+              ls -la openwrt/bin/
+              echo ""
+              
+              echo "3. Searching for any files in openwrt/bin..."
+              find openwrt/bin -type f 2>/dev/null | head -20 || echo "No files found"
+            else
+              echo "ERROR: openwrt/bin directory does not exist!"
+              echo "Possible build output locations:"
+              find . -type d -name "bin" 2>/dev/null
+            fi
+          else
+            echo "ERROR: openwrt directory does not exist!"
+            echo "Build may have failed despite reporting success"
+          fi
+          echo "=== DIAGNOSTICS END ==="
+
+      - name: Smart firmware collection
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          echo "=== SMART FIRMWARE COLLECTION ==="
           mkdir -p firmware/${{ matrix.name }}
           
-          # 查找固件文件的多种可能路径
-          echo "[collect] Searching for firmware files..."
+          echo "Searching for firmware files..."
           
-          # 方法1：标准查找
-          if find openwrt/bin/targets -type f \( -name "*.img.gz" -o -name "*.img" -o -name "*.bin" -o -name "*.tar.gz" \) ! -path "*/packages/*" -exec cp {} firmware/${{ matrix.name }}/ \; 2>/dev/null; then
-            echo "[collect] Found files with standard pattern"
+          # 策略1：标准 OpenWrt 路径
+          STANDARD_FILES=$(find openwrt/bin/targets -type f \( -name "*.img" -o -name "*.img.gz" -o -name "*.bin" -o -name "*.tar.gz" \) ! -path "*/packages/*" 2>/dev/null || true)
+          
+          if [ -n "$STANDARD_FILES" ]; then
+            echo "✓ Found files with standard path:"
+            echo "$STANDARD_FILES"
+            echo "$STANDARD_FILES" | xargs -I {} cp {} firmware/${{ matrix.name }}/ 2>/dev/null || true
           else
-            echo "[collect] Standard pattern failed, trying alternative..."
+            echo "✗ Standard path failed, trying alternative strategies..."
             
-            # 方法2：查找任何可能的目标文件
-            TARGET_PATHS=$(find openwrt/bin -type f 2>/dev/null | grep -v "/packages/" | grep -E "\.(img|gz|bin|tar)$" || true)
-            if [ -n "$TARGET_PATHS" ]; then
-              echo "[collect] Found files:"
-              echo "$TARGET_PATHS"
-              echo "$TARGET_PATHS" | xargs -I {} cp {} firmware/${{ matrix.name }}/ 2>/dev/null || true
+            # 策略2：查找任何看起来像固件的文件
+            echo "Searching for any firmware-like files..."
+            ALL_FILES=$(find openwrt -type f \( -name "*.img" -o -name "*.img.gz" -o -name "*.bin" -o -name "*.tar.gz" -o -name "*firmware*" -o -name "*image*" \) 2>/dev/null | grep -v "/packages/" || true)
+            
+            if [ -n "$ALL_FILES" ]; then
+              echo "✓ Found files:"
+              echo "$ALL_FILES"
+              echo "$ALL_FILES" | xargs -I {} cp {} firmware/${{ matrix.name }}/ 2>/dev/null || true
             else
-              # 方法3：如果还是找不到，可能是路径结构不同
-              echo "[collect] Could not find standard firmware files"
-              echo "[collect] Checking alternative directory structure..."
-              
-              # iStoreOS 可能使用不同的输出目录
-              if [ -d "openwrt/bin/targets/x86" ]; then
-                echo "[collect] Found x86 target directory"
-                find openwrt/bin/targets/x86 -type f -exec cp {} firmware/${{ matrix.name }}/ \; 2>/dev/null || true
-              elif [ -d "openwrt/bin/targets/x86_64" ]; then
-                echo "[collect] Found x86_64 target directory"
-                find openwrt/bin/targets/x86_64 -type f -exec cp {} firmware/${{ matrix.name }}/ \; 2>/dev/null || true
-              fi
+              echo "✗ No firmware files found with any pattern"
+              echo "This suggests the build didn't produce firmware files"
+              echo ""
+              echo "Debug information:"
+              echo "All files in openwrt directory:"
+              find openwrt -type f 2>/dev/null | head -30 || echo "No files found"
+              exit 1
             fi
           fi
           
-          echo "[collect] Collected files:"
-          ls -lh firmware/${{ matrix.name }}/ 2>/dev/null || echo "No files collected"
-          
-          # 检查是否收集到了文件
-          COUNT=0
-          if [ -d "firmware/${{ matrix.name }}" ]; then
-            COUNT=$(find firmware/${{ matrix.name }} -type f 2>/dev/null | wc -l)
-          fi
+          # 验证结果
+          echo ""
+          echo "=== COLLECTION RESULTS ==="
+          COLLECTED_FILES=$(find firmware/${{ matrix.name }} -type f 2>/dev/null || true)
+          COUNT=$(echo "$COLLECTED_FILES" | wc -l)
           
           if [ "$COUNT" -eq 0 ]; then
-            echo "##[error] No firmware images collected!"
-            echo "##[error] Debug information:"
-            echo "##[error] Current directory: $(pwd)"
-            echo "##[error] openwrt/bin structure:"
-            find openwrt/bin -type f 2>/dev/null | sort
+            echo "##[error] FAILED: No files collected"
             exit 1
           else
-            echo "[collect] Successfully collected $COUNT firmware file(s)"
+            echo "✓ SUCCESS: Collected $COUNT file(s)"
+            echo "Files:"
+            ls -lh firmware/${{ matrix.name }}/
           fi
+
       - name: Upload firmware artifact
         if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
@@ -324,7 +344,7 @@ jobs:
             | [luci-app-openclash](https://github.com/vernesong/OpenClash) | OpenClash 插件 |
             | [Clash Meta (mihomo)](https://github.com/MetaCubeX/mihomo) | 已预置于 `/etc/openclash/core/clash_meta` |
             | [luci-app-passwall](https://github.com/xiaorouji/openwrt-passwall) | PassWall 插件 |
-            | [passwall-packages](https://github.com/xiaorouji/openwrt-passwall-packages) | PassWall 依赖（xray、sing-box 等） |
+            | [passwall-packages](https://github.com/xiaorouji/openwrt-passwall-packages) | PassWall 依赖（xray、sing-box等） |
 
             ### 包含平台
             | Target | 说明 |
