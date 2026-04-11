@@ -312,204 +312,122 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-
     permissions:
-
       contents: write
 
     steps:
-
       - name: Checkout this repository
-
         uses: actions/checkout@v4
 
-
-
       - name: Download firmware artifacts
-
         uses: actions/download-artifact@v4
-
         with:
-
-          path: firmware-artifacts/
-
+          path: firmware-files/
           pattern: "istoreos-plugins-*-${{ github.run_number }}"
-
           merge-multiple: true
 
-
-
-      - name: List and filter firmware files
-
-
-
+      - name: Verify and prepare firmware files
         run: |
-
-          echo "=== FILTERING FIRMWARE FILES ==="
-
-          echo "All downloaded files:"
-
-          find firmware-artifacts/ -type f 2>/dev/null | sort || echo "No files found"
-
+          echo "=== VERIFYING FIRMWARE FILES ==="
+          echo "Downloaded files structure:"
+          find firmware-files/ -type f 2>/dev/null | sort || echo "No files found"
           
-
-          # 创建干净的固件目录
-
-          mkdir -p clean-firmware
-
+          # 创建干净的发布目录
+          mkdir -p release-firmware
           
-
-          # 只复制真正的固件文件（排除编译中间文件）
-
           echo ""
-
-          echo "Filtering for actual firmware files..."
-
+          echo "Looking for actual firmware files..."
           
-
-          # 查找固件文件（常见的扩展名）
-
-          FIRMWARE_FILES=$(find firmware-artifacts/ -type f \( \
-
-            -name "*.img.gz" -o \
-
-            -name "*.img" -o \
-
-            -name "*.bin" -o \
-
-            -name "*.tar.gz" -o \
-
-            -name "*factory*.bin" -o \
-
-            -name "*sysupgrade*.bin" -o \
-
-            -name "*combined*.img" \
-
-          \) 2>/dev/null | sort || true)
-
-
-
-          if [ -n "$FIRMWARE_FILES" ]; then
-
-            echo "Found firmware files:"
-
-            echo "$FIRMWARE_FILES"
-
-            echo "$FIRMWARE_FILES" | xargs -I {} cp {} clean-firmware/ 2>/dev/null || true
-
-
-
+          # 查找真正的固件文件（基于常见的固件扩展名）
+          FIRMWARE_EXTENSIONS="img img.gz bin tar.gz combined factory sysupgrade"
+          FOUND_FILES=()
+          
+          for ext in $FIRMWARE_EXTENSIONS; do
+            FILES=$(find firmware-files/ -type f -name "*.$ext" 2>/dev/null || true)
+            if [ -n "$FILES" ]; then
+              echo "Found .$ext files:"
+              echo "$FILES"
+              FOUND_FILES+=($FILES)
+            fi
+          done
+          
+          # 如果没有找到标准扩展名，查找任何大文件（>10MB）
+          if [ ${#FOUND_FILES[@]} -eq 0 ]; then
+            echo "No standard firmware files found. Looking for large files (>10MB)..."
+            LARGE_FILES=$(find firmware-files/ -type f -size +10M 2>/dev/null || true)
+            if [ -n "$LARGE_FILES" ]; then
+              echo "Found large files (likely firmware):"
+              echo "$LARGE_FILES"
+              FOUND_FILES+=($LARGE_FILES)
+            fi
+          fi
+          
+          # 复制找到的文件到发布目录
+          if [ ${#FOUND_FILES[@]} -gt 0 ]; then
+            echo ""
+            echo "Copying firmware files to release directory..."
+            for file in "${FOUND_FILES[@]}"; do
+              if [ -f "$file" ]; then
+                echo "Copying: $file"
+                cp "$file" release-firmware/
+              fi
+            done
           else
-
-            echo "No standard firmware files found. Copying all non-source files..."
-
-            # 如果没有找到标准固件文件，复制所有非源码文件
-
-            find firmware-artifacts/ -type f ! -name "*.c" ! -name "*.h" ! -name "*.cpp" ! -name "*.py" ! -name "*.sh" ! -name "*.md" ! -name "*.txt" ! -name "*.json" ! -name "*.yaml" ! -name "*.yml" ! -name "Makefile" ! -name "*.mk" ! -name "*.patch" ! -name "*.diff" 2>/dev/null | head -20 | xargs -I {} cp {} clean-firmware/ 2>/dev/null || true
-
-          fi
-
-          
-
-          echo ""
-
-          echo "Clean firmware files:"
-
-          ls -lh clean-firmware/ 2>/dev/null || echo "No files in clean-firmware"
-
-          
-
-          COUNT=$(find clean-firmware/ -type f 2>/dev/null | wc -l)
-
-          if [ "$COUNT" -eq 0 ]; then
-
-            echo "##[error] No firmware files to release!"
-
+            echo "##[error] ERROR: No firmware files found!"
+            echo "##[error] All files in artifact:"
+            find firmware-files/ -type f -exec ls -lh {} \; 2>/dev/null || true
             exit 1
-
           fi
-
-          echo "Ready to release $COUNT firmware file(s)"
-
-
+          
+          echo ""
+          echo "=== RELEASE READY ==="
+          echo "Firmware files ready for release:"
+          ls -lh release-firmware/
+          
+          COUNT=$(find release-firmware/ -type f 2>/dev/null | wc -l)
+          echo "Total firmware files: $COUNT"
+          
+          if [ "$COUNT" -eq 0 ]; then
+            echo "##[error] CRITICAL: No firmware files to release!"
+            exit 1
+          fi
 
       - name: Generate release tag
-
-
-
         id: tag
-
         run: |
-
           TAG="istoreos-24.10-plugins-$(date -u +'%Y%m%d%H%M')"
-
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
           echo "[release] Tag: ${TAG}"
 
-
-
       - name: Create GitHub Release
-
         uses: softprops/action-gh-release@v2
-
         with:
-
           tag_name: ${{ steps.tag.outputs.tag }}
-
           name: "iStoreOS 24.10 + OpenClash + PassWall — ${{ steps.tag.outputs.tag }}"
-
           body: |
-
             ## iStoreOS Firmware + Plugins — Automated Build
 
-
-
             Compiled from the official [iStoreOS source](https://github.com/istoreos/istoreos)
-
             (`istoreos-24.10` branch) with the following additions:
 
-
-
             | 组件 | 来源 |
-
             |------|------|
-
             | [luci-app-openclash](https://github.com/vernesong/OpenClash) | OpenClash 插件 |
-
             | [Clash Meta (mihomo)](https://github.com/MetaCubeX/mihomo) | 已预置于 `/etc/openclash/core/clash_meta` |
-
             | [luci-app-passwall](https://github.com/xiaorouji/openwrt-passwall) | PassWall 插件 |
-
             | [passwall-packages](https://github.com/xiaorouji/openwrt-passwall-packages) | PassWall 依赖（xray、sing-box等） |
 
-
-
             ### 包含平台
-
             | Target | 说明 |
-
             |--------|------|
-
             | x86_64 | PC / 虚拟机（EFI + BIOS） |
-
             | arm64  | 通用 AArch64 / armvirt 64-bit |
 
-
-
             ### 官方原版固件
-
             不含任何插件的纯官方版本请使用 **Build iStoreOS Firmware** workflow 编译。
-
-          files: clean-firmware/**/*
-
+          files: release-firmware/**/*
           draft: false
-
           prerelease: false
-
-          fail_on_unmatched_files: false
-
+          fail_on_unmatched_files: true
         env:
-
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
